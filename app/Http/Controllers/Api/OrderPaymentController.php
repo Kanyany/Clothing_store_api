@@ -9,18 +9,16 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use KHQR\BakongKHQR;
+use KHQR\Helpers\KHQRData;
+use KHQR\Models\IndividualInfo;
 
 class OrderPaymentController extends Controller
 {
     /**
-     * Create a normal payment for an order.
+     * Create a manual / non-Bakong payment record.
      *
-     * Supported currencies:
-     * - USD
-     * - KHR
-     *
-     * Order total is stored in USD.
-     * KHR is converted to USD using KHR_PER_USD.
+     * POST /api/orders/{order}/payment
      */
     public function store(Request $request, Order $order)
     {
@@ -60,67 +58,61 @@ class OrderPaymentController extends Controller
         ]);
 
         $result = DB::transaction(function () use ($validated, $order) {
-
-            $order = Order::lockForUpdate()
+            $lockedOrder = Order::lockForUpdate()
                 ->findOrFail($order->id);
 
-            $exchangeRate = (float) env(
-                'KHR_PER_USD',
-                4000
-            );
+            /*
+             * The order total is stored in USD.
+             *
+             * Convert KHR payment to USD when necessary.
+             */
+            $amount = (float) $validated['amount'];
 
-            if ($validated['currency'] === 'KHR') {
-                $amountUsd =
-                    (float) $validated['amount']
-                    / $exchangeRate;
-            } else {
-                $amountUsd =
-                    (float) $validated['amount'];
-            }
+            $amountUsd = strtoupper($validated['currency']) === 'USD'
+                ? $amount
+                : (
+                    $amount /
+                    (float) env('KHR_PER_USD', 4000)
+                );
 
-            $paidAmountUsd = (float) $order
+            $amountUsd = round($amountUsd, 2);
+
+            /*
+             * Calculate how much has already been paid
+             * using normalized USD amounts.
+             */
+            $paidAmountUsd = (float) $lockedOrder
                 ->payments()
                 ->sum('amount_usd');
 
-            $orderTotalUsd = (float) $order->total;
-
             $remainingAmountUsd =
-                $orderTotalUsd - $paidAmountUsd;
+                (float) $lockedOrder->total -
+                $paidAmountUsd;
 
-            if ($remainingAmountUsd <= 0) {
+            if ($remainingAmountUsd <= 0.01) {
                 abort(
                     422,
                     'This order has already been fully paid.'
                 );
             }
 
-            if (
-                $amountUsd >
-                ($remainingAmountUsd + 0.01)
-            ) {
+            if ($amountUsd > $remainingAmountUsd + 0.01) {
                 abort(
                     422,
-                    'Payment amount cannot be greater than remaining amount.'
+                    'Payment amount cannot be greater than the remaining amount.'
                 );
             }
 
-            $amountUsd = min(
-                $amountUsd,
-                $remainingAmountUsd
-            );
-
             $payment = OrderPayment::create([
-                'order_id' => $order->id,
+                'order_id' => $lockedOrder->id,
 
-                'amount' => $validated['amount'],
+                'amount' => $amount,
 
-                'amount_usd' => round(
-                    $amountUsd,
-                    2
+                'amount_usd' => $amountUsd,
+
+                'currency' => strtoupper(
+                    $validated['currency']
                 ),
-
-                'currency' =>
-                    $validated['currency'],
 
                 'payment_method' =>
                     $validated['payment_method'],
@@ -139,46 +131,26 @@ class OrderPaymentController extends Controller
                 $paidAmountUsd + $amountUsd;
 
             $newRemainingAmountUsd =
-                $orderTotalUsd - $newPaidAmountUsd;
+                (float) $lockedOrder->total -
+                $newPaidAmountUsd;
 
-            if ($newRemainingAmountUsd < 0.01) {
-                $newRemainingAmountUsd = 0;
-            }
-
-            if ($newRemainingAmountUsd <= 0) {
-
-                $order->update([
+            if ($newRemainingAmountUsd <= 0.01) {
+                $lockedOrder->update([
                     'payment_status' => 'paid',
                     'status' => 'confirmed',
                 ]);
-
             } else {
-
-                $order->update([
+                $lockedOrder->update([
                     'payment_status' => 'partial',
                 ]);
             }
 
             return [
                 'payment' => $payment,
-
-                'order' =>
-                    $order->fresh(),
-
-                'paid_amount_usd' =>
-                    round(
-                        $newPaidAmountUsd,
-                        2
-                    ),
-
+                'order' => $lockedOrder->fresh(),
+                'paid_amount_usd' => $newPaidAmountUsd,
                 'remaining_amount_usd' =>
-                    round(
-                        $newRemainingAmountUsd,
-                        2
-                    ),
-
-                'exchange_rate' =>
-                    $exchangeRate,
+                    max(0, $newRemainingAmountUsd),
             ];
         });
 
@@ -195,7 +167,7 @@ class OrderPaymentController extends Controller
                     $result['payment'],
 
                 'summary' => [
-                    'order_total_usd' =>
+                    'order_total' =>
                         (float) $result['order']->total,
 
                     'paid_amount_usd' =>
@@ -203,9 +175,6 @@ class OrderPaymentController extends Controller
 
                     'remaining_amount_usd' =>
                         $result['remaining_amount_usd'],
-
-                    'exchange_rate' =>
-                        $result['exchange_rate'],
 
                     'payment_status' =>
                         $result['order']->payment_status,
@@ -217,9 +186,207 @@ class OrderPaymentController extends Controller
         ], 201);
     }
 
+    /**
+     * Generate a REAL dynamic KHQR for this order.
+     *
+     * POST /api/orders/{order}/payment/khqr
+     *
+     * The amount comes from the real database order total.
+     */
+    public function khqr(Request $request, Order $order)
+    {
+        $accountId = trim(
+            (string) config('services.bakong.account_id')
+        );
+
+        $merchantName = trim(
+            (string) config('services.bakong.merchant_name')
+        );
+
+        $merchantCity = trim(
+            (string) config('services.bakong.merchant_city')
+        );
+
+        if (
+            $accountId === '' ||
+            $merchantName === '' ||
+            $merchantCity === ''
+        ) {
+            return response()->json([
+                'status' => 'error',
+
+                'message' =>
+                    'Bakong merchant configuration is missing. Please configure BAKONG_ACCOUNT_ID, BAKONG_MERCHANT_NAME and BAKONG_MERCHANT_CITY.',
+            ], 500);
+        }
+
+        $amount = (float) $order->total;
+
+        if ($amount <= 0) {
+            return response()->json([
+                'status' => 'error',
+
+                'message' =>
+                    'This order has no payable amount.',
+            ], 422);
+        }
+
+        $currency = strtoupper(
+            (string) config(
+                'services.bakong.currency',
+                'USD'
+            )
+        );
+
+        if (!in_array($currency, ['USD', 'KHR'], true)) {
+            return response()->json([
+                'status' => 'error',
+
+                'message' =>
+                    'Bakong currency must be USD or KHR.',
+            ], 500);
+        }
+
+        try {
+            $info = new IndividualInfo(
+                bakongAccountID: $accountId,
+
+                merchantName: $merchantName,
+
+                merchantCity: $merchantCity,
+
+                currency: $currency === 'KHR'
+                    ? KHQRData::CURRENCY_KHR
+                    : KHQRData::CURRENCY_USD,
+
+                amount: $amount,
+
+                expirationTimestamp: strval(
+                    floor(microtime(true) * 1000) +
+                    (5 * 60 * 1000)
+                ),
+            );
+
+            /*
+             * Make the KHQR specific to this real order.
+             */
+            $info->billNumber =
+                'ORDER-' . $order->id;
+
+            $storeLabel = config(
+                'services.bakong.store_label'
+            );
+
+            $terminalLabel = config(
+                'services.bakong.terminal_label'
+            );
+
+            $purpose = config(
+                'services.bakong.purpose',
+                'Clothing order payment'
+            );
+
+            if ($storeLabel) {
+                $info->storeLabel = $storeLabel;
+            }
+
+            if ($terminalLabel) {
+                $info->terminalLabel = $terminalLabel;
+            }
+
+            if ($purpose) {
+                $info->purposeOfTransaction =
+                    $purpose;
+            }
+
+            $result =
+                BakongKHQR::generateIndividual($info);
+
+            $statusCode = (int) data_get(
+                $result,
+                'status.code'
+            );
+
+            if ($statusCode !== 0) {
+                return response()->json([
+                    'status' => 'error',
+
+                    'message' =>
+                        data_get(
+                            $result,
+                            'status.message',
+                            'Unable to generate KHQR.'
+                        ),
+                ], 422);
+            }
+
+            $qr = data_get(
+                $result,
+                'data.qr'
+            );
+
+        $md5 = data_get(
+            $result,
+            'data.md5'
+        );
+
+        Log::info('BAKONG QR GENERATED', [
+            'order_id' => $order->id,
+            'md5' => $md5,
+            'amount' => $amount,
+            'currency' => $currency,
+        ]);
+
+
+            if (!$qr || !$md5) {
+                return response()->json([
+                    'status' => 'error',
+
+                    'message' =>
+                        'Bakong SDK did not return a valid KHQR.',
+                ], 422);
+            }
+
+            return response()->json([
+                'status' => 'success',
+
+                'message' =>
+                    'Bakong KHQR generated successfully.',
+
+                'data' => [
+                    'order_id' => $order->id,
+
+                    'amount' => $amount,
+
+                    'currency' => $currency,
+
+                    'qr' => $qr,
+
+                    'md5' => $md5,
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            Log::error(
+                'Bakong KHQR generation exception',
+                [
+                    'order_id' => $order->id,
+                    'message' => $e->getMessage(),
+                ]
+            );
+
+            return response()->json([
+                'status' => 'error',
+
+                'message' =>
+                    'Unable to generate Bakong KHQR.',
+            ], 500);
+        }
+    }
 
     /**
-     * Generate Bakong deeplink from KHQR.
+     * Generate Bakong deeplink from a KHQR string.
+     *
+     * POST /api/orders/{order}/payment/deeplink
      */
     public function deeplink(
         Request $request,
@@ -237,11 +404,11 @@ class OrderPaymentController extends Controller
             '/'
         );
 
-        $token =
-            config('services.bakong.token');
+        $token = config(
+            'services.bakong.token'
+        );
 
         if (!$baseUrl || !$token) {
-
             return response()->json([
                 'status' => 'error',
 
@@ -251,10 +418,18 @@ class OrderPaymentController extends Controller
         }
 
         try {
-
             $response = Http::withToken($token)
                 ->acceptJson()
-                ->timeout(30)
+                ->timeout(20)
+                ->connectTimeout(10)
+                ->withOptions([
+                    'curl' => [
+                        CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
+                        CURLOPT_RESOLVE => [
+                            'api-bakong.nbc.gov.kh:443:13.35.36.32',
+                        ],
+                    ],
+                ])
                 ->post(
                     $baseUrl .
                     '/v1/generate_deeplink_by_qr',
@@ -270,7 +445,10 @@ class OrderPaymentController extends Controller
 
                             'appName' =>
                                 config(
-                                    'services.bakong.name'
+                                    'services.bakong.app_name',
+                                    config(
+                                        'services.bakong.name'
+                                    )
                                 ),
 
                             'appDeepLinkCallback' =>
@@ -282,7 +460,6 @@ class OrderPaymentController extends Controller
                 );
 
             if (!$response->successful()) {
-
                 Log::error(
                     'Bakong deeplink request failed',
                     [
@@ -308,31 +485,6 @@ class OrderPaymentController extends Controller
                 ], 422);
             }
 
-            $bakongData =
-                $response->json();
-
-            if (
-                data_get(
-                    $bakongData,
-                    'responseCode'
-                ) !== 0
-            ) {
-
-                return response()->json([
-                    'status' => 'error',
-
-                    'message' =>
-                        data_get(
-                            $bakongData,
-                            'responseMessage',
-                            'Bakong deeplink generation failed.'
-                        ),
-
-                    'bakong_response' =>
-                        $bakongData,
-                ], 422);
-            }
-
             return response()->json([
                 'status' => 'success',
 
@@ -340,11 +492,9 @@ class OrderPaymentController extends Controller
                     'Bakong deeplink generated successfully.',
 
                 'data' =>
-                    $bakongData,
+                    $response->json(),
             ]);
-
         } catch (\Throwable $e) {
-
             Log::error(
                 'Bakong deeplink exception',
                 [
@@ -362,15 +512,10 @@ class OrderPaymentController extends Controller
         }
     }
 
-
     /**
-     * Verify Bakong transaction by MD5.
+     * Verify a REAL Bakong transaction by MD5.
      *
-     * If Bakong confirms the transaction:
-     * - Create OrderPayment
-     * - Calculate USD amount
-     * - Update order payment status
-     * - Confirm order when fully paid
+     * POST /api/orders/{order}/payment/verify
      */
     public function verify(
         Request $request,
@@ -389,11 +534,11 @@ class OrderPaymentController extends Controller
             '/'
         );
 
-        $token =
-            config('services.bakong.token');
+        $token = config(
+            'services.bakong.token'
+        );
 
         if (!$baseUrl || !$token) {
-
             return response()->json([
                 'status' => 'error',
 
@@ -403,276 +548,339 @@ class OrderPaymentController extends Controller
         }
 
         try {
-
-            $response = Http::withToken($token)
-                ->acceptJson()
-                ->timeout(30)
-                ->post(
-                    $baseUrl .
-                    '/v1/check_transaction_by_md5',
-                    [
-                        'md5' =>
-                            $validated['md5'],
-                    ]
-                );
-
-            if (!$response->successful()) {
-
+            /*
+             * Ask Bakong for the real transaction.
+             */
+           $response = Http::withToken($token)
+            ->acceptJson()
+            ->retry(3, 1500, throw: false)
+            ->timeout(30)
+            ->connectTimeout(15)
+                ->withOptions([
+            'curl' => [
+                CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
+                CURLOPT_RESOLVE => [
+                    'api-bakong.nbc.gov.kh:443:13.35.36.32',
+                ],
+            ],
+        ])
+            ->post(
+                $baseUrl . '/v1/check_transaction_by_md5',
+                [
+                    'md5' => $validated['md5'],
+                ]
+            );      
+                        if (!$response->successful()) {
                 Log::warning(
                     'Bakong transaction verification failed',
                     [
-                        'status' =>
-                            $response->status(),
-
-                        'body' =>
-                            $response->body(),
+                        'order_id' => $order->id,
+                        'status' => $response->status(),
+                        'body' => $response->body(),
                     ]
                 );
 
                 return response()->json([
-                    'status' => 'error',
-
-                    'message' =>
-                        'Bakong transaction verification failed.',
-
-                    'bakong_status' =>
-                        $response->status(),
-
-                    'bakong_response' =>
-                        $response->json(),
-                ], 422);
+                    'status' => 'success',
+                    'message' => 'Bakong verification is temporarily unavailable.',
+                    'data' => [
+                        'verified' => false,
+                    ],
+                ], 200);
             }
 
-            $bakongData =
-                $response->json();
+            $bakongData = $response->json();
+
+            Log::info('FULL BAKONG VERIFY RESPONSE', [
+                'order_id' => $order->id,
+                'requested_md5' => $validated['md5'],
+                'http_status' => $response->status(),
+                'full_response' => $bakongData,
+            ]);
 
             /*
-             * Bakong responseCode:
-             *
-             * 0 = success
-             * 1 = failed
+             * Bakong success responseCode = 0.
              */
             $isSuccessful =
                 (int) data_get(
                     $bakongData,
                     'responseCode',
-                    1
+                    -1
                 ) === 0;
 
-            if (!$isSuccessful) {
-
-                return response()->json([
-                    'status' => 'success',
-
-                    'message' =>
-                        'Bakong transaction has not been confirmed.',
-
-                    'data' => [
-                        'verified' => false,
-
-                        'bakong_response' =>
-                            $bakongData,
-                    ],
-                ]);
-            }
-
-            /*
-             * Transaction information returned by Bakong.
-             */
             $transaction =
                 data_get(
                     $bakongData,
                     'data'
                 );
 
-            if (!$transaction) {
-
+            /*
+             * Transaction is not confirmed yet.
+             */
+            if (
+                !$isSuccessful ||
+                !is_array($transaction)
+            ) {
                 return response()->json([
-                    'status' => 'error',
-
-                    'message' =>
-                        'Bakong returned no transaction data.',
-                ], 422);
+                    'status' => 'pending',
+                    'message' => data_get(
+                        $bakongData,
+                        'responseMessage',
+                        'Bakong payment has not been confirmed yet.'
+                    ),
+                    'data' => [
+                        'verified' => false,
+                        'bakong_response_code' => data_get(
+                            $bakongData,
+                            'responseCode'
+                        ),
+                    ],
+                ], 200);
             }
 
-            $transactionHash =
-                data_get(
-                    $transaction,
-                    'hash'
-                );
-
-            $transactionCurrency =
-                strtoupper(
-                    data_get(
-                        $transaction,
-                        'currency'
-                    )
-                );
-
+            /*  
+             * Real transaction amount.
+             */
             $transactionAmount =
                 (float) data_get(
                     $transaction,
-                    'amount'
+                    'amount',
+                    0
                 );
 
-            if (!$transactionHash) {
+            /*
+             * Real transaction currency.
+             */
+            $transactionCurrency =
+                strtoupper(
+                    (string) data_get(
+                        $transaction,
+                        'currency',
+                        ''
+                    )
+                );
 
+            /*
+             * Expected order amount.
+             */
+            $expectedAmount =
+                (float) $order->total;
+
+            /*
+             * Expected Bakong currency.
+             */
+            $expectedCurrency =
+                strtoupper(
+                    (string) config(
+                        'services.bakong.currency',
+                        'USD'
+                    )
+                );
+
+            /*
+             * Never mark the order as paid unless
+             * amount and currency match.
+             */
+            if (
+                abs(
+                    $transactionAmount -
+                    $expectedAmount
+                ) > 0.01
+                ||
+                $transactionCurrency !==
+                    $expectedCurrency
+            ) {
                 return response()->json([
                     'status' => 'error',
 
                     'message' =>
-                        'Bakong transaction hash is missing.',
-                ], 422);
-            }
+                        'Bakong payment does not match this order.',
 
-            if (!in_array(
-                $transactionCurrency,
-                ['USD', 'KHR'],
-                true
-            )) {
+                    'data' => [
+                        'verified' => false,
 
-                return response()->json([
-                    'status' => 'error',
+                        'order_total' =>
+                            $expectedAmount,
 
-                    'message' =>
-                        'Unsupported Bakong transaction currency.',
-                ], 422);
-            }
+                        'order_currency' =>
+                            $expectedCurrency,
 
-            if ($transactionAmount <= 0) {
+                        'payment_amount' =>
+                            $transactionAmount,
 
-                return response()->json([
-                    'status' => 'error',
-
-                    'message' =>
-                        'Invalid Bakong transaction amount.',
+                        'payment_currency' =>
+                            $transactionCurrency,
+                    ],
                 ], 422);
             }
 
             /*
-             * Prevent the same Bakong transaction
-             * from being recorded twice.
+             * Verify that the money was sent to
+             * the configured store Bakong account.
              */
-            $existingPayment =
-                OrderPayment::where(
-                    'transaction_hash',
-                    $transactionHash
-                )->first();
+            $merchantAccountId =
+                trim(
+                    (string) config(
+                        'services.bakong.account_id'
+                    )
+                );
 
-            if ($existingPayment) {
+            $toAccountId =
+                trim(
+                    (string) data_get(
+                        $transaction,
+                        'toAccountId',
+                        ''
+                    )
+                );
 
+            if (
+                $merchantAccountId !== '' &&
+                $toAccountId !== '' &&
+                $merchantAccountId !==
+                    $toAccountId
+            ) {
                 return response()->json([
-                    'status' => 'success',
+                    'status' => 'error',
 
                     'message' =>
-                        'Bakong transaction has already been recorded.',
+                        'Bakong payment receiver does not match the store account.',
 
                     'data' => [
-                        'verified' => true,
-
-                        'already_recorded' => true,
-
-                        'payment' =>
-                            $existingPayment->load('order'),
-
-                        'bakong_response' =>
-                            $bakongData,
+                        'verified' => false,
                     ],
-                ]);
+                ], 422);
             }
 
+            /*
+             * Convert the verified Bakong amount
+             * into USD for amount_usd.
+             *
+             * Your current configuration is:
+             *
+             * KHR_PER_USD=4000
+             */
+            $transactionAmountUsd =
+                $transactionCurrency === 'USD'
+                    ? $transactionAmount
+                    : (
+                        $transactionAmount /
+                        (float) env(
+                            'KHR_PER_USD',
+                            4000
+                        )
+                    );
+
+            $transactionAmountUsd =
+                round(
+                    $transactionAmountUsd,
+                    2
+                );
+
+            /*
+             * Save payment safely inside a transaction.
+             */
             $result = DB::transaction(
                 function () use (
                     $order,
                     $transaction,
-                    $transactionHash,
-                    $transactionCurrency,
-                    $transactionAmount
+                    $validated,
+                    $transactionAmount,
+                    $transactionAmountUsd
                 ) {
-
-                    $order = Order::lockForUpdate()
-                        ->findOrFail($order->id);
+                    $lockedOrder =
+                        Order::lockForUpdate()
+                            ->findOrFail(
+                                $order->id
+                            );
 
                     /*
-                     * Make sure this order is not already fully paid.
+                     * Prevent duplicate recording
+                     * of the same Bakong transaction.
                      */
-                    $paidAmountUsd =
-                        (float) $order
+                    $existingPayment =
+                        $lockedOrder
                             ->payments()
-                            ->sum('amount_usd');
+                            ->where(
+                                'payment_method',
+                                'bakong'
+                            )
+                            ->where(
+                                'reference_number',
+                                $validated['md5']
+                            )
+                            ->first();
 
-                    $orderTotalUsd =
-                        (float) $order->total;
+                    if ($existingPayment) {
+                        return [
+                            'payment' =>
+                                $existingPayment,
 
-                    $remainingAmountUsd =
-                        $orderTotalUsd
-                        - $paidAmountUsd;
+                            'order' =>
+                                $lockedOrder->fresh(),
 
-                    if ($remainingAmountUsd <= 0) {
-
-                        abort(
-                            422,
-                            'This order has already been fully paid.'
-                        );
+                            'already_recorded' =>
+                                true,
+                        ];
                     }
 
                     /*
-                     * Convert KHR to USD.
+                     * Use amount_usd because the order total
+                     * is stored in USD.
                      */
-                    $exchangeRate = (float) env(
-                        'KHR_PER_USD',
-                        4000
-                    );
+                    $paidAmountUsd =
+                        (float) $lockedOrder
+                            ->payments()
+                            ->sum('amount_usd');
 
-                    if (
-                        $transactionCurrency === 'KHR'
-                    ) {
+                    $remainingAmountUsd =
+                        (float) $lockedOrder->total -
+                        $paidAmountUsd;
 
-                        $amountUsd =
-                            $transactionAmount
-                            / $exchangeRate;
+                    /*
+                     * Order is already fully paid.
+                     */
+                    if ($remainingAmountUsd <= 0.01) {
+                        return [
+                            'payment' => null,
 
-                    } else {
+                            'order' =>
+                                $lockedOrder->fresh(),
 
-                        $amountUsd =
-                            $transactionAmount;
+                            'already_recorded' =>
+                                true,
+                        ];
                     }
 
                     /*
                      * Prevent overpayment.
                      */
                     if (
-                        $amountUsd >
-                        ($remainingAmountUsd + 0.01)
+                        $transactionAmountUsd >
+                        $remainingAmountUsd + 0.01
                     ) {
-
                         abort(
                             422,
-                            'Bakong payment amount is greater than the remaining order amount.'
+                            'Bakong payment is greater than the remaining order amount.'
                         );
                     }
 
-                    $amountUsd = min(
-                        $amountUsd,
-                        $remainingAmountUsd
-                    );
-
                     /*
-                     * Create payment record.
+                     * IMPORTANT:
+                     *
+                     * amount_usd is required by your
+                     * order_payments database table.
                      */
                     $payment =
                         OrderPayment::create([
                             'order_id' =>
-                                $order->id,
+                                $lockedOrder->id,
 
                             'amount' =>
                                 $transactionAmount,
 
                             'amount_usd' =>
-                                round(
-                                    $amountUsd,
-                                    2
-                                ),
+                                $transactionAmountUsd,
 
                             'currency' =>
                                 $transactionCurrency,
@@ -684,54 +892,44 @@ class OrderPaymentController extends Controller
                                 'Bakong',
 
                             'reference_number' =>
-                                $transactionHash,
-
-                            'transaction_hash' =>
-                                $transactionHash,
-
-                            'md5' =>
-                                null,
+                                $validated['md5'],
 
                             'note' =>
-                                'Verified Bakong payment',
+                                data_get(
+                                    $transaction,
+                                    'description'
+                                ),
                         ]);
 
                     /*
-                     * Calculate new totals.
+                     * Calculate the new paid amount.
                      */
                     $newPaidAmountUsd =
-                        $paidAmountUsd
-                        + $amountUsd;
+                        $paidAmountUsd +
+                        $transactionAmountUsd;
 
                     $newRemainingAmountUsd =
-                        $orderTotalUsd
-                        - $newPaidAmountUsd;
-
-                    if (
-                        $newRemainingAmountUsd < 0.01
-                    ) {
-
-                        $newRemainingAmountUsd = 0;
-                    }
+                        (float) $lockedOrder->total -
+                        $newPaidAmountUsd;
 
                     /*
-                     * Update order.
+                     * Fully paid.
                      */
                     if (
-                        $newRemainingAmountUsd <= 0
+                        $newRemainingAmountUsd <= 0.01
                     ) {
-
-                        $order->update([
+                        $lockedOrder->update([
                             'payment_status' =>
                                 'paid',
 
                             'status' =>
                                 'confirmed',
                         ]);
-
                     } else {
-
-                        $order->update([
+                        /*
+                         * Partially paid.
+                         */
+                        $lockedOrder->update([
                             'payment_status' =>
                                 'partial',
                         ]);
@@ -742,69 +940,40 @@ class OrderPaymentController extends Controller
                             $payment,
 
                         'order' =>
-                            $order->fresh(),
+                            $lockedOrder->fresh(),
 
-                        'paid_amount_usd' =>
-                            round(
-                                $newPaidAmountUsd,
-                                2
-                            ),
-
-                        'remaining_amount_usd' =>
-                            round(
-                                $newRemainingAmountUsd,
-                                2
-                            ),
-
-                        'exchange_rate' =>
-                            $exchangeRate,
+                        'already_recorded' =>
+                            false,
                     ];
                 }
             );
 
-            $result['payment']->load('order');
-
+            /*
+             * Return success to Flutter.
+             */
             return response()->json([
                 'status' => 'success',
 
                 'message' =>
-                    'Bakong transaction verified and payment recorded successfully.',
+                    'Bakong payment verified successfully.',
 
                 'data' => [
                     'verified' => true,
 
-                    'already_recorded' => false,
+                    'already_recorded' =>
+                        $result['already_recorded'],
 
                     'payment' =>
                         $result['payment'],
 
-                    'summary' => [
-                        'order_total_usd' =>
-                            (float) $result['order']->total,
+                    'order' =>
+                        $result['order'],
 
-                        'paid_amount_usd' =>
-                            $result['paid_amount_usd'],
-
-                        'remaining_amount_usd' =>
-                            $result['remaining_amount_usd'],
-
-                        'exchange_rate' =>
-                            $result['exchange_rate'],
-
-                        'payment_status' =>
-                            $result['order']->payment_status,
-
-                        'order_status' =>
-                            $result['order']->status,
-                    ],
-
-                    'bakong_response' =>
-                        $bakongData,
+                    'transaction' =>
+                        $transaction,
                 ],
             ]);
-
         } catch (\Throwable $e) {
-
             Log::error(
                 'Bakong verification exception',
                 [
@@ -820,7 +989,7 @@ class OrderPaymentController extends Controller
                 'status' => 'error',
 
                 'message' =>
-                    'Unable to verify Bakong transaction.',
+                    'Unable to verify Bakong payment.',
             ], 500);
         }
     }

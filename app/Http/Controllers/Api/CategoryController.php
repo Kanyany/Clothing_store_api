@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Category;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 class CategoryController extends Controller
 {
@@ -13,10 +14,14 @@ class CategoryController extends Controller
      */
     public function index()
     {
-        $categories = Category::with('children')
-            ->whereNull('parent_id')
-            ->latest()
-            ->get();
+        $categories = Category::with([
+        'children.children',
+        ])
+
+        ->whereNull('parent_id')
+        ->where('status', true)
+        ->orderByRaw("FIELD(name, 'Women', 'Men', 'Kids')")
+        ->get();
 
         return response()->json([
             'status' => 'success',
@@ -29,10 +34,23 @@ class CategoryController extends Controller
      */
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'parent_id' => 'nullable|exists:categories,id',
+        $parentId = $request->input('parent_id');
 
-            'name' => 'required|string|max:255|unique:categories,name',
+        $validated = $request->validate([
+            'parent_id' => [
+                'nullable',
+                'exists:categories,id',
+            ],
+
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+                Rule::unique('categories', 'name')
+                    ->where(function ($query) use ($parentId) {
+                        return $query->where('parent_id', $parentId);
+                    }),
+            ],
 
             'description' => 'nullable|string',
 
@@ -41,20 +59,12 @@ class CategoryController extends Controller
             'status' => 'nullable|boolean',
         ]);
 
-        // Prevent category from being its own parent
-        if (
-            isset($validated['parent_id']) &&
-            $validated['parent_id'] === null
-        ) {
-            $validated['parent_id'] = null;
-        }
-
         $category = Category::create($validated);
 
-        // Load parent and children
         $category->load([
             'parent',
             'children',
+            'products',
         ]);
 
         return response()->json([
@@ -71,7 +81,7 @@ class CategoryController extends Controller
     {
         $category->load([
             'parent',
-            'children',
+            'children.children',
             'products',
         ]);
 
@@ -86,11 +96,35 @@ class CategoryController extends Controller
      */
     public function update(Request $request, Category $category)
     {
-        $validated = $request->validate([
-            'parent_id' => 'nullable|exists:categories,id',
+        $parentId = $request->input('parent_id');
 
-            'name' =>
-                'required|string|max:255|unique:categories,name,' . $category->id,
+        // Prevent category from being its own parent.
+        if (
+            $parentId !== null &&
+            (int) $parentId === $category->id
+        ) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'A category cannot be its own parent.',
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'parent_id' => [
+                'nullable',
+                'exists:categories,id',
+            ],
+
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+                Rule::unique('categories', 'name')
+                    ->where(function ($query) use ($parentId) {
+                        return $query->where('parent_id', $parentId);
+                    })
+                    ->ignore($category->id),
+            ],
 
             'description' => 'nullable|string',
 
@@ -98,17 +132,6 @@ class CategoryController extends Controller
 
             'status' => 'nullable|boolean',
         ]);
-
-        // Prevent category from being its own parent
-        if (
-            isset($validated['parent_id']) &&
-            (int) $validated['parent_id'] === $category->id
-        ) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'A category cannot be its own parent.',
-            ], 422);
-        }
 
         $category->update($validated);
 

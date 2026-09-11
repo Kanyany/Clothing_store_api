@@ -13,20 +13,23 @@ class ProductVariant extends Model
     use HasFactory;
 
     protected $fillable = [
-        'product_id',
-        'sku',
-        'barcode',
-        'size',
-        'color',
-        'cost_price',
-        'selling_price',
-        'status',
+    'product_id',
+    'sku',
+    'barcode',
+    'size',
+    'color',
+    'cost_price',
+    'selling_price',
+    'discount_type',
+    'discount_value',
+    'status',
     ];
 
     protected $casts = [
-        'cost_price' => 'decimal:2',
-        'selling_price' => 'decimal:2',
-        'status' => 'boolean',
+    'cost_price' => 'decimal:2',
+    'selling_price' => 'decimal:2',
+    'discount_value' => 'decimal:2',
+    'status' => 'boolean',
     ];
 
     public function product(): BelongsTo

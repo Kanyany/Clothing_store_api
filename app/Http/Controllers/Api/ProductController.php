@@ -8,12 +8,21 @@ use Illuminate\Http\Request;
 
 class ProductController extends Controller
 {
-   public function index()
+    public function index(Request $request)
     {
-        $products = Product::with([
+        $query = Product::with([
             'category',
             'variants.inventory',
-        ])->latest()->get();
+        ]);
+
+        // Filter by category
+        if ($request->filled('category_id')) {
+            $query->where('category_id', $request->category_id);
+        }
+
+        $products = $query
+            ->latest()
+            ->get();
 
         return response()->json([
             'status' => 'success',
@@ -28,7 +37,6 @@ class ProductController extends Controller
             'name' => 'required|string|max:255',
             'description' => 'nullable|string',
             'gender' => 'required|in:male,female,unisex,kids',
-            'brand' => 'nullable|string|max:255',
             'image' => 'nullable|string|max:255',
             'status' => 'boolean',
         ]);
@@ -60,7 +68,6 @@ class ProductController extends Controller
             'name' => 'sometimes|required|string|max:255',
             'description' => 'nullable|string',
             'gender' => 'sometimes|required|in:male,female,unisex,kids',
-            'brand' => 'nullable|string|max:255',
             'image' => 'nullable|string|max:255',
             'status' => 'boolean',
         ]);

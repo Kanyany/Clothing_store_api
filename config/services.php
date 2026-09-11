@@ -19,13 +19,20 @@ return [
     'ses' => [
         'key' => env('AWS_ACCESS_KEY_ID'),
         'secret' => env('AWS_SECRET_ACCESS_KEY'),
-        'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
+        'region' => env(
+            'AWS_DEFAULT_REGION',
+            'us-east-1'
+        ),
     ],
 
     'slack' => [
         'notifications' => [
-            'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
-            'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
+            'bot_user_oauth_token' => env(
+                'SLACK_BOT_USER_OAUTH_TOKEN'
+            ),
+            'channel' => env(
+                'SLACK_BOT_USER_DEFAULT_CHANNEL'
+            ),
         ],
     ],
 
@@ -35,28 +42,70 @@ return [
     |--------------------------------------------------------------------------
     */
 
-   'bakong' => [
-    'base_url' => env(
-        'BAKONG_BASE_URL',
-        'https://api-bakong.nbc.gov.kh'
-    ),
+    'bakong' => [
 
-    'token' => env(
-        'BAKONG_TOKEN'
-    ),
+        // Bakong API
+        'base_url' => env(
+            'BAKONG_BASE_URL',
+            'https://api-bakong.nbc.gov.kh'
+        ),
 
-    'name' => env(
-        'BAKONG_NAME',
-        'My Clothing POS'
-    ),
+        // Bakong API access token
+        'token' => env(
+            'BAKONG_TOKEN'
+        ),
 
-    'app_icon_url' => env(
-        'BAKONG_APP_ICON_URL'
-    ),
+        // REAL Bakong merchant account
+        'account_id' => env(
+            'BAKONG_ACCOUNT_ID'
+        ),
 
-    'callback' => env(
-        'BAKONG_APP_CALLBACK'
-    ),
-],
+        // Merchant information
+        'merchant_name' => env(
+            'BAKONG_MERCHANT_NAME',
+            'My Clothing POS'
+        ),
+
+        'merchant_city' => env(
+            'BAKONG_MERCHANT_CITY',
+            'PHNOM PENH'
+        ),
+
+        // Currency
+        'currency' => env(
+            'BAKONG_CURRENCY',
+            'USD'
+        ),
+
+        // KHQR information
+        'store_label' => env(
+            'BAKONG_STORE_LABEL',
+            'My Clothing POS'
+        ),
+
+        'terminal_label' => env(
+            'BAKONG_TERMINAL_LABEL',
+            'Online Store'
+        ),
+
+        'purpose' => env(
+            'BAKONG_PURPOSE',
+            'Clothing order payment'
+        ),
+
+        // Optional application information
+        'app_icon_url' => env(
+            'BAKONG_APP_ICON_URL'
+        ),
+
+        'app_name' => env(
+            'BAKONG_APP_NAME',
+            'My Clothing POS'
+        ),
+
+        'callback' => env(
+            'BAKONG_CALLBACK'
+        ),
+    ],
 
 ];

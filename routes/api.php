@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Storage;
 
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\CategoryController;
@@ -22,37 +23,107 @@ use App\Http\Controllers\Api\AddressController;
 
 /*
 |--------------------------------------------------------------------------
-| Authentication
+| PUBLIC AUTHENTICATION
 |--------------------------------------------------------------------------
+|
+| Guest can login/register.
+|
 */
 
 Route::post('/login', [AuthController::class, 'login']);
+
 Route::post('/register', [RegisterController::class, 'register']);
 
 
 /*
 |--------------------------------------------------------------------------
-| Protected API Routes
+| PUBLIC STORE DATA
 |--------------------------------------------------------------------------
+|
+| Guest និង Logged-in User អាចមើល Products និង Categories បាន។
+|
+| GET  /api/categories
+| GET  /api/categories/{category}
+|
+| GET  /api/products
+| GET  /api/products/{product}
+|
+*/
+
+Route::apiResource(
+    'categories',
+    CategoryController::class
+)->only([
+    'index',
+    'show',
+]);
+
+Route::apiResource(
+    'products',
+    ProductController::class
+)->only([
+    'index',
+    'show',
+]);
+
+
+/*
+|--------------------------------------------------------------------------
+| PRODUCT IMAGES
+|--------------------------------------------------------------------------
+|
+| Serve product images through Laravel API.
+|
+*/
+
+Route::get('/product-image/{path}', function ($path) {
+    $file = storage_path('app/public/' . $path);
+
+    if (!file_exists($file)) {
+        abort(404);
+    }
+
+    return response()->file($file);
+})->where('path', '.*');
+
+
+/*
+|--------------------------------------------------------------------------
+| PROTECTED API ROUTES
+|--------------------------------------------------------------------------
+|
+| Routes ខាងក្រោមត្រូវការ Login។
+|
 */
 
 Route::middleware('auth:sanctum')->group(function () {
 
+
     /*
     |--------------------------------------------------------------------------
-    | Authentication
+    | AUTHENTICATION
     |--------------------------------------------------------------------------
     */
 
-    Route::post('/logout', [AuthController::class, 'logout']);
+    Route::post(
+        '/logout',
+        [AuthController::class, 'logout']
+    );
 
-    Route::put('/user/profile', [AuthController::class, 'updateProfile']);
+    Route::put(
+        '/user/profile',
+        [AuthController::class, 'updateProfile']
+    );
 
     Route::get('/me', function (Illuminate\Http\Request $request) {
-            $user = $request->user()->load('role.permissions');
+
+        $user = $request->user()->load(
+            'role.permissions'
+        );
 
         return response()->json([
             'status' => 'success',
+
             'user' => [
                 'id' => $user->id,
                 'name' => $user->name,
@@ -66,31 +137,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Categories
-    |--------------------------------------------------------------------------
-    */
-
-    Route::apiResource(
-        'categories',
-        CategoryController::class
-    );
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Products
-    |--------------------------------------------------------------------------
-    */
-
-    Route::apiResource(
-        'products',
-        ProductController::class
-    );
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Product Variants
+    | PRODUCT VARIANTS
     |--------------------------------------------------------------------------
     */
 
@@ -102,7 +149,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Inventory
+    | INVENTORY
     |--------------------------------------------------------------------------
     */
 
@@ -139,7 +186,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Purchases
+    | PURCHASES
     |--------------------------------------------------------------------------
     */
 
@@ -151,7 +198,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Sales
+    | SALES
     |--------------------------------------------------------------------------
     */
 
@@ -163,7 +210,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | POS Payments
+    | POS PAYMENTS
     |--------------------------------------------------------------------------
     */
 
@@ -173,14 +220,14 @@ Route::middleware('auth:sanctum')->group(function () {
     );
 
     Route::get(
-        'sales/{saleId}/payments',
+        '/sales/{saleId}/payments',
         [PaymentController::class, 'salePayments']
     );
 
 
     /*
     |--------------------------------------------------------------------------
-    | Reports
+    | REPORTS
     |--------------------------------------------------------------------------
     */
 
@@ -192,7 +239,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Wishlist
+    | WISHLIST
     |--------------------------------------------------------------------------
     */
 
@@ -219,7 +266,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Cart
+    | CART
     |--------------------------------------------------------------------------
     */
 
@@ -248,68 +295,100 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
     /*
-|--------------------------------------------------------------------------
-| Orders
-|--------------------------------------------------------------------------
-*/
+    |--------------------------------------------------------------------------
+    | ORDERS
+    |--------------------------------------------------------------------------
+    */
 
-Route::get('/orders', [OrderController::class, 'index']);
+    Route::get(
+        '/orders',
+        [OrderController::class, 'index']
+    );
 
-Route::get('/orders/{order}', [OrderController::class, 'show']);
+    Route::get(
+        '/orders/{order}',
+        [OrderController::class, 'show']
+    );
 
-Route::post('/orders', [OrderController::class, 'store']);
+    Route::post(
+        '/orders',
+        [OrderController::class, 'store']
+    );
 
 
     /*
     |--------------------------------------------------------------------------
-    | Order Payments
+    | ORDER PAYMENTS
     |--------------------------------------------------------------------------
     */
 
-    // Create normal payment
     Route::post(
         '/orders/{order}/payment',
         [OrderPaymentController::class, 'store']
     );
 
-    // Create Bakong payment/deeplink
     Route::post(
         '/orders/{order}/payment/deeplink',
         [OrderPaymentController::class, 'deeplink']
     );
 
-    // Verify Bakong payment
     Route::post(
         '/orders/{order}/payment/verify',
         [OrderPaymentController::class, 'verify']
     );
 
-    
-    /*
-    |--------------------------------------------------------------------------
-    | setting
-    |--------------------------------------------------------------------------
-    */
-
-
-    Route::get('/settings', [SettingController::class, 'show']);
-    Route::put('/settings', [SettingController::class, 'update']);
-
 
     /*
     |--------------------------------------------------------------------------
-    | addresses
+    | SETTINGS
     |--------------------------------------------------------------------------
     */
 
+    Route::get(
+        '/settings',
+        [SettingController::class, 'show']
+    );
 
-    Route::get('/addresses', [AddressController::class, 'index']);
-    Route::post('/addresses', [AddressController::class, 'store']);
-    Route::get('/addresses/{id}', [AddressController::class, 'show']);
-    Route::put('/addresses/{id}', [AddressController::class, 'update']);
-    Route::delete('/addresses/{id}', [AddressController::class, 'destroy']);
+    Route::put(
+        '/settings',
+        [SettingController::class, 'update']
+    );
 
 
+    /*
+    |--------------------------------------------------------------------------
+    | ADDRESSES
+    |--------------------------------------------------------------------------
+    */
 
+    Route::get(
+        '/addresses',
+        [AddressController::class, 'index']
+    );
+
+    Route::post(
+        '/addresses',
+        [AddressController::class, 'store']
+    );
+
+    Route::get(
+        '/addresses/{id}',
+        [AddressController::class, 'show']
+    );
+
+    Route::put(
+        '/addresses/{id}',
+        [AddressController::class, 'update']
+    );
+
+    Route::delete(
+        '/addresses/{id}',
+        [AddressController::class, 'destroy']
+    );
+
+    Route::post(
+    '/orders/{order}/payment/khqr',
+    [OrderPaymentController::class, 'khqr']
+);
 
 });
